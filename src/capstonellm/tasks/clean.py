@@ -119,6 +119,11 @@ def fetchTechnologyFilemap(tag=None):
 
     return pairs_by_tech
 
+def push(results_table: sf.DataFrame, tag: str):
+    output_path = f"s3a://{BUCKET_NAME}/cleaned/Tenim64/{tag}"
+    logger.info(f"Writing cleaned question documents to {output_path}")
+    results_table.write.mode("overwrite").json(output_path)
+
 def clean(spark: SparkSession, environment: str, tag: str):
     files_map = fetchTechnologyFilemap(tag)
     questions_table = spark.createDataFrame([], RawQuestionStructure)
@@ -173,6 +178,11 @@ def clean(spark: SparkSession, environment: str, tag: str):
                 "question_id"
             )
             .agg(
+                sf.col("question_id"),
+                sf.first("title").alias("title"),
+                sf.first("body").alias("body"),
+                sf.first("score").alias("score"),
+                sf.first("is_answered").alias("is_answered"),
                 sf.collect_list(
                     sf.struct("response_body", "response_score", "is_accepted_response")
                 ).alias("responses")
@@ -180,6 +190,9 @@ def clean(spark: SparkSession, environment: str, tag: str):
         )
 
     logger.info(f"Results table has {results_table.count()} columns: {results_table.columns}")
+    print(results_table.limit(1).show())
+
+    push(results_table)
 
 def main():
     logging.basicConfig(level=logging.INFO)
