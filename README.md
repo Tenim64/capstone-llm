@@ -24,7 +24,7 @@ We recommend that you:
 * Commit changes by clicking the green button
 * Finally, click the button to "Open in GitHub workspaces":
 
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/datamindedacademy/capstone-llm)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Tenim64/capstone-llm)
 
 ## GitHub Codespaces environment
 
