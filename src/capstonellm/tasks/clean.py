@@ -44,7 +44,7 @@ RawQuestionStructure = StructType([
     StructField("link", StringType(), True),
     StructField("owner", RawOwnerSchema, True),
     StructField("protected_date", StringType(), True),
-    StructField("question_id", StringType(), True),
+    StructField("question_id", IntegerType(), True),
     StructField("score", StringType(), True),
     StructField("tags", ArrayType(StringType()), True),
     StructField("title", StringType(), True),
@@ -80,7 +80,7 @@ ResponseStructure = StructType([
 ])
 
 QuestionStructure = StructType([
-    StructField("question_id", StringType(), True),
+    StructField("question_id", IntegerType(), True),
     StructField("title", StringType(), True),
     StructField("body", StringType(), True),
     StructField("score", StringType(), True),
@@ -119,7 +119,7 @@ def fetchTechnologyFilemap(tag=None):
 
     return pairs_by_tech
 
-def push(results_table: sf.DataFrame, tag: str):
+def push(results_table, tag: str):
     output_path = f"s3a://{BUCKET_NAME}/cleaned/Tenim64/{tag}"
     logger.info(f"Writing cleaned question documents to {output_path}")
     results_table.write.mode("overwrite").json(output_path)
@@ -162,14 +162,14 @@ def clean(spark: SparkSession, environment: str, tag: str):
             .select("question_id", "title", "body", "score", "is_answered")
             .join(
                 answers_table
+                .filter(
+                    (sf.col("score") >= 0) | sf.col("is_accepted")
+                )
                 .select(
                     sf.col("question_id"),
                     sf.col("body").alias("response_body"),
                     sf.col("score").alias("response_score"),
                     sf.col("is_accepted").alias("is_accepted_response")
-                )
-                .filter(
-                    (sf.col("score") >= 0) | sf.col("is_accepted")
                 ),
                 on="question_id",
                 how="left"
@@ -178,21 +178,22 @@ def clean(spark: SparkSession, environment: str, tag: str):
                 "question_id"
             )
             .agg(
-                sf.col("question_id"),
                 sf.first("title").alias("title"),
                 sf.first("body").alias("body"),
                 sf.first("score").alias("score"),
                 sf.first("is_answered").alias("is_answered"),
                 sf.collect_list(
-                    sf.struct("response_body", "response_score", "is_accepted_response")
+                    sf.when(
+                        sf.col("response_body").isNotNull(),
+                        sf.struct("response_body", "response_score", "is_accepted_response")
+                    )
                 ).alias("responses")
             )
         )
 
     logger.info(f"Results table has {results_table.count()} columns: {results_table.columns}")
-    print(results_table.limit(1).show())
 
-    push(results_table)
+    push(results_table, tag)
 
 def main():
     logging.basicConfig(level=logging.INFO)
