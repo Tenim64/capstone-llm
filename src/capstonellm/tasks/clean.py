@@ -89,6 +89,7 @@ QuestionStructure = StructType([
 ])
 
 BUCKET_NAME = "dataminded-academy-capstone-llm-data"
+USER = "Tenim64"
 
 logger = logging.getLogger(__name__)
 
@@ -101,14 +102,14 @@ def fetchTechnologyFilemap(tag=None):
     s3 = boto3.client("s3")
     paginator = s3.get_paginator("list_objects_v2")
 
-    prefix = f"input/{tag}/" if tag else "input"
+    prefix = f"input/{USER}/{tag}/" if tag else "input"
 
     pairs_by_tech = {}
 
     for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            technology = key.split("/")[1]
+            technology = key.split("/")[2]
 
             pair = pairs_by_tech.setdefault(technology, {"technology": technology, "questions": None, "answers": None})
 
