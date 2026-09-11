@@ -22,8 +22,15 @@ BUCKET_NAME = "dataminded-academy-capstone-llm-data"
 USER = "Tenim64"
 
 
+_QUOTA_EXHAUSTED = False
+
+
 def _call_api(endpoint: str, params: dict) -> list[dict]:
     """Call a Stack Exchange API endpoint, following pagination and backoff until exhausted."""
+    global _QUOTA_EXHAUSTED
+    if _QUOTA_EXHAUSTED:
+        logger.warning("Skipping API call, quota already exhausted")
+        return []
     items: list[dict] = []
     page = 1
     base_params = {
@@ -50,6 +57,7 @@ def _call_api(endpoint: str, params: dict) -> list[dict]:
         quota_remaining = payload.get("quota_remaining")
         if quota_remaining is not None and quota_remaining < 5:
             logger.warning(f"Stopping early, quota nearly exhausted ({quota_remaining} left)")
+            _QUOTA_EXHAUSTED = True
             break
 
         if not payload.get("has_more") or page >= MAX_PAGES:
@@ -77,6 +85,9 @@ def fetch_questions(tag: str) -> list[dict]:
 def fetch_answers(question_ids: list[int]) -> list[dict]:
     answers: list[dict] = []
     for i in range(0, len(question_ids), ANSWER_CHUNK_SIZE):
+        if _QUOTA_EXHAUSTED:
+            logger.warning("Stopping answer fetch early, quota already exhausted")
+            break
         chunk = question_ids[i : i + ANSWER_CHUNK_SIZE]
         ids_param = ";".join(str(question_id) for question_id in chunk)
         logger.info(f"Fetching answers for {len(chunk)} questions")

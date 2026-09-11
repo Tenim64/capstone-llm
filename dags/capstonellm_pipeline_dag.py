@@ -2,6 +2,7 @@ import os
 from datetime import datetime, timedelta
 
 from airflow import DAG
+from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.providers.docker.operators.docker import DockerOperator
 
@@ -41,6 +42,7 @@ with DAG(
 
     ingest = DockerOperator(
         task_id="ingest",
+        retries=0,
         image=IMAGE,
         container_name="capstonellm_ingest",
         api_version="auto",
@@ -63,8 +65,19 @@ with DAG(
         network_mode="bridge",
         mount_tmp_dir=False,
         environment=AWS_ENV,
+        trigger_rule="all_done"
+    )
+
+    verify_llm = BashOperator(
+        task_id="verify_llm",
+        bash_command=(
+            'curl -sf -X POST "$LLM_VERIFY_URL" '
+            '-H "Content-Type: application/json" '
+            '-d \'{"query": "What is the equivalent of DataFrame.drop_duplicates() from pandas in polars?"}\''
+        ),
+        env={"LLM_VERIFY_URL": os.environ.get("LLM_VERIFY_URL", "")},
     )
 
     end_dag = EmptyOperator(task_id="end_dag")
 
-    start_dag >> ingest >> clean >> end_dag
+    start_dag >> ingest >> clean >> verify_llm >> end_dag
