@@ -4,4 +4,11 @@ USER 0
 ENV PYSPARK_PYTHON python3
 WORKDIR /opt/spark/work-dir
 
-#TODO add your project code and dependencies to the image
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+COPY pyproject.toml requirements.txt README.md ./
+COPY src/ ./src/
+
+RUN uv pip install --system --no-cache -r requirements.txt
+
+ENTRYPOINT ["python3", "-m"]
