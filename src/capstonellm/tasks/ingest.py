@@ -1,118 +1,114 @@
 import argparse
+import json
 import logging
-from typing import List
+import time
+from typing import Dict, List, Optional
 
 import boto3
-import pyspark.sql.functions as sf
-from pyspark.sql import SparkSession
-from pyspark.sql.types import (
-    ArrayType,
-    BooleanType,
-    IntegerType,
-    StringType,
-    StructField,
-    StructType,
-    TimestampType,
-)
+import requests
 
 logger = logging.getLogger(__name__)
-spark = SparkSession.builder.getOrCreate()
 
-RawOwnerSchema = StructType([
-    StructField("account_id", IntegerType(), True),
-    StructField("reputation", IntegerType(), True),
-    StructField("user_id", IntegerType(), True),
-    StructField("user_type", StringType(), True),
-    StructField("accept_rate", IntegerType(), True),
-    StructField("profile_image", StringType(), True),
-    StructField("display_name", StringType(), True),
-    StructField("link", StringType(), True),
-])
-
-RawQuestionStructure = StructType([
-    StructField("accepted_answer_id", StringType(), True),
-    StructField("answer_count", StringType(), True),
-    StructField("body", StringType(), True),
-    StructField("closed_date", TimestampType(), True),
-    StructField("closed_reason", StringType(), True),
-    StructField("content_license", StringType(), True),
-    StructField("creation_date", TimestampType(), True),
-    StructField("is_answered", BooleanType(), True),
-    StructField("last_activity_date", TimestampType(), True),
-    StructField("last_edit_date", TimestampType(), True),
-    StructField("link", StringType(), True),
-    StructField("owner", RawOwnerSchema, True),
-    StructField("protected_date", StringType(), True),
-    StructField("question_id", StringType(), True),
-    StructField("score", StringType(), True),
-    StructField("tags", ArrayType(StringType()), True),
-    StructField("title", StringType(), True),
-    StructField("view_count", IntegerType(), True),
-])
-
-RawQuestionJsonStructure = StructType([
-    StructField("items", ArrayType(RawQuestionStructure), True)
-])
+API_BASE_URL = "https://api.stackexchange.com/2.3"
+SITE = "stackoverflow"
+PAGE_SIZE = 100
+MAX_PAGES = 25
+ANSWER_CHUNK_SIZE = 100
+REQUEST_TIMEOUT = 30
 
 BUCKET_NAME = "dataminded-academy-capstone-llm-data"
-DEBUG_MODE = True
+# Personal namespace so raw dumps don't clash with the data provided by others,
+# mirrors the handle already used by the cleaning script's `push()` output path.
+USER = "Tenim64"
 
-def debugPrint(text):
-    if DEBUG_MODE:
-        print(text)
 
-def fetchTechnologyFilemap():
-    # Structure:
-    # input/
-    #.  - <technology>/
-    #.      - answers.json
-    #.      - questions.json
-    s3 = boto3.client("s3")
-    paginator = s3.get_paginator("list_objects_v2")
+def _call_api(endpoint: str, params: dict) -> list[dict]:
+    """Call a Stack Exchange API endpoint, following pagination and backoff until exhausted."""
+    items: list[dict] = []
+    page = 1
+    base_params = {
+        "site": SITE,
+        "pagesize": PAGE_SIZE,
+        **params,
+    }
 
-    pairs_by_tech = {}
+    while True:
+        response = requests.get(
+            f"{API_BASE_URL}/{endpoint}",
+            params={**base_params, "page": page},
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        items.extend(payload.get("items", []))
 
-    for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix="input"):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            technology = key.split("/")[1]
+        backoff = payload.get("backoff")
+        if backoff:
+            logger.info(f"API requested a backoff of {backoff}s, sleeping")
+            time.sleep(backoff)
 
-            pair = pairs_by_tech.setdefault(technology, {"technology": technology, "questions": None, "answers": None})
+        quota_remaining = payload.get("quota_remaining")
+        if quota_remaining is not None and quota_remaining < 5:
+            logger.warning(f"Stopping early, quota nearly exhausted ({quota_remaining} left)")
+            break
 
-            if key.endswith("questions.json"):
-                pair["questions"] = key
-            elif key.endswith("answers.json"):
-                pair["answers"] = key
+        if not payload.get("has_more") or page >= MAX_PAGES:
+            break
+        page += 1
 
-    return pairs_by_tech
+    return items
+
+
+def fetch_questions(tag: str) -> list[dict]:
+    logger.info(f"Fetching questions tagged '{tag}'")
+    questions = _call_api(
+        "questions",
+        {
+            "tagged": tag,
+            "filter": "withbody",
+            "sort": "votes",
+            "order": "desc",
+        },
+    )
+    logger.info(f"Fetched {len(questions)} questions for tag '{tag}'")
+    return questions
+
+
+def fetch_answers(question_ids: list[int]) -> list[dict]:
+    answers: list[dict] = []
+    for i in range(0, len(question_ids), ANSWER_CHUNK_SIZE):
+        chunk = question_ids[i : i + ANSWER_CHUNK_SIZE]
+        ids_param = ";".join(str(question_id) for question_id in chunk)
+        logger.info(f"Fetching answers for {len(chunk)} questions")
+        answers.extend(
+            _call_api(
+                f"questions/{ids_param}/answers",
+                {"filter": "withbody"},
+            )
+        )
+    logger.info(f"Fetched {len(answers)} answers")
+    return answers
+
+
+def push_to_s3(items: list[dict], tag: str, filename: str, s3_client=None):
+    s3_client = s3_client or boto3.client("s3")
+    key = f"input/{USER}/{tag}/{filename}"
+    logger.info(f"Writing {len(items)} raw items to s3://{BUCKET_NAME}/{key}")
+    body = json.dumps({"items": items}).encode("utf-8")
+    s3_client.put_object(Bucket=BUCKET_NAME, Key=key, Body=body)
+
 
 def ingest(tag: str):
-    files_map = fetchTechnologyFilemap()
-    questions_table = spark.createDataFrame([], RawQuestionStructure)
-    # answers_table = spark.createDataFrame([], RawAnswerStructure)
+    questions = fetch_questions(tag)
+    push_to_s3(questions, tag, "questions.json")
 
-    for technology, paths in files_map.items():
-        if tag and technology != tag:
-            continue
+    question_ids = [q["question_id"] for q in questions if "question_id" in q]
+    answers = fetch_answers(question_ids)
+    push_to_s3(answers, tag, "answers.json")
 
-        if paths["questions"] is not None:
-            questions_path = f"s3://{BUCKET_NAME}/{paths['questions']}"
-            questions_json_raw = spark.read.schema(RawQuestionJsonStructure).json("questions.json")
-            questions_df_raw = questions_json_raw.select(sf.explode(sf.col("items")).alias("question")).select("question.*")
-            debugPrint(f"Technology '{technology}' lists {questions_df_raw.count()} questions")
-            questions_table = questions_table.union(questions_df_raw)
-
-        if paths["answers"] is not None:
-            answers_path = f"s3://{BUCKET_NAME}/{paths['answers']}"
-            # answers_json_raw = spark.read.schema(RawAnswerJsonStructure).json("answers.json")
-            # answers_df_raw = json_raw.select(sf.explode(sf.col("items")).alias("answer")).select("answer.*")
-            # answers_table = answers_table.union(answers_df_raw)
-            # debugPrint(f"Technology '{technology}' lists {answers_df_raw.count()} answers")
-    # debugPrint(f"Found {questions_table.count()} questions and {answers_table.count()} answers")
-    debugPrint(f"Found {questions_table.count()} questions")
-    
 
 def main():
+    logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="stackoverflow ingest")
     parser.add_argument(
         "-t", "--tag", dest="tag", help="Tag of the question in stackoverflow to process",
